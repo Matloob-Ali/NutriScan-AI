@@ -188,6 +188,23 @@ def day_totals(analyses: dict) -> dict:
     return totals
 
 
+def md_table(headers: list, rows: list) -> str:
+    """Build a Markdown table (renders without any lazy-loaded Streamlit component)."""
+    esc = lambda v: str(v).replace("|", "/").replace("\n", " ")
+    out = ["| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|"]
+    for row in rows:
+        out.append("| " + " | ".join(esc(c) for c in row) + " |")
+    return "\n".join(out)
+
+
+def text_bar(value: float, total: float, width: int = 12) -> str:
+    """Tiny text progress bar such as ████████░░░░."""
+    if total <= 0:
+        return ""
+    filled = round(min(value / total, 1.0) * width)
+    return "█" * filled + "░" * (width - filled)
+
+
 # --------------------------------------------------------------------------- #
 # Gemini calls
 # --------------------------------------------------------------------------- #
@@ -410,6 +427,13 @@ with st.sidebar:
     else:
         model_name = _choice
 
+    lite_mode = st.checkbox(
+        "Lightweight display",
+        value=True,
+        help="Shows results as simple text, tables and bars. Turn ON if you see "
+        "'Failed to fetch dynamically imported module' errors. Turn OFF for charts and cards.",
+    )
+
     st.subheader("👤 Your profile")
     sex = st.radio("Sex", ["Male", "Female"], horizontal=True)
     col_a, col_b = st.columns(2)
@@ -542,54 +566,78 @@ if analyses:
     used_targets = snapshot["targets"] if snapshot else targets
     totals = day_totals(analyses)
 
+    nutrient_rows = [
+        ("calories", "Calories", "kcal"),
+        ("protein_g", "Protein", "g"),
+        ("carbs_g", "Carbs", "g"),
+        ("fat_g", "Fat", "g"),
+        ("fiber_g", "Fiber", "g"),
+        ("sugar_g", "Sugar (limit)", "g"),
+        ("sodium_mg", "Sodium (limit)", "mg"),
+    ]
+
     # --- Totals vs targets ---------------------------------------------------
     st.subheader("Today vs your targets")
-    metric_cols = st.columns(5)
-    for col, (key, label, unit) in zip(
-        metric_cols,
-        [
-            ("calories", "Calories", "kcal"),
-            ("protein_g", "Protein", "g"),
-            ("carbs_g", "Carbs", "g"),
-            ("fat_g", "Fat", "g"),
-            ("fiber_g", "Fiber", "g"),
-        ],
-    ):
-        target = used_targets[key]
-        eaten = totals[key]
-        col.metric(label, f"{eaten:.0f} {unit}", f"target {target} {unit}", delta_color="off")
-        col.caption(f"{min(eaten / target * 100, 999):.0f}% of target" if target else "")
-
-    extra_cols = st.columns(2)
-    extra_cols[0].metric(
-        "Sugar", f"{totals['sugar_g']:.0f} g",
-        f"limit ~{used_targets['sugar_g']} g", delta_color="off",
-    )
-    extra_cols[1].metric(
-        "Sodium", f"{totals['sodium_mg']:.0f} mg",
-        f"limit {used_targets['sodium_mg']} mg", delta_color="off",
-    )
-
-    # --- Charts --------------------------------------------------------------
-    chart_left, chart_right = st.columns(2)
-    with chart_left:
-        st.markdown("**Calories by meal**")
-        cal_df = pd.DataFrame(
-            {"kcal": [meal_totals(a)["calories"] for a in analyses.values()]},
-            index=list(analyses.keys()),
+    if lite_mode:
+        rows = []
+        for key, label, unit in nutrient_rows:
+            eaten, target = totals[key], used_targets[key]
+            pct = f"{eaten / target * 100:.0f}%" if target else ""
+            rows.append(
+                [label, f"{eaten:.0f} {unit}", f"{target} {unit}", pct, text_bar(eaten, target)]
+            )
+        st.markdown(md_table(["Nutrient", "Eaten", "Target", "% of target", ""], rows))
+    else:
+        metric_cols = st.columns(5)
+        for col, (key, label, unit) in zip(metric_cols, nutrient_rows[:5]):
+            target = used_targets[key]
+            eaten = totals[key]
+            col.metric(label, f"{eaten:.0f} {unit}", f"target {target} {unit}", delta_color="off")
+            col.caption(f"{min(eaten / target * 100, 999):.0f}% of target" if target else "")
+        extra_cols = st.columns(2)
+        extra_cols[0].metric(
+            "Sugar", f"{totals['sugar_g']:.0f} g",
+            f"limit ~{used_targets['sugar_g']} g", delta_color="off",
         )
-        st.bar_chart(cal_df)
-    with chart_right:
-        st.markdown("**Macros by meal (grams)**")
-        macro_df = pd.DataFrame(
-            {
-                "Protein": [meal_totals(a)["protein_g"] for a in analyses.values()],
-                "Carbs": [meal_totals(a)["carbs_g"] for a in analyses.values()],
-                "Fat": [meal_totals(a)["fat_g"] for a in analyses.values()],
-            },
-            index=list(analyses.keys()),
+        extra_cols[1].metric(
+            "Sodium", f"{totals['sodium_mg']:.0f} mg",
+            f"limit {used_targets['sodium_mg']} mg", delta_color="off",
         )
-        st.bar_chart(macro_df)
+
+    # --- Per-meal comparison -------------------------------------------------
+    if lite_mode:
+        st.markdown("**Calories and macros by meal**")
+        max_cal = max((meal_totals(a)["calories"] for a in analyses.values()), default=0)
+        meal_rows = []
+        for m, a in analyses.items():
+            mt = meal_totals(a)
+            meal_rows.append([
+                m, f"{mt['calories']:.0f}", f"{mt['protein_g']:.0f}", f"{mt['carbs_g']:.0f}",
+                f"{mt['fat_g']:.0f}", text_bar(mt["calories"], max_cal),
+            ])
+        st.markdown(md_table(
+            ["Meal", "kcal", "Protein (g)", "Carbs (g)", "Fat (g)", "Calories"], meal_rows
+        ))
+    else:
+        chart_left, chart_right = st.columns(2)
+        with chart_left:
+            st.markdown("**Calories by meal**")
+            cal_df = pd.DataFrame(
+                {"kcal": [meal_totals(a)["calories"] for a in analyses.values()]},
+                index=list(analyses.keys()),
+            )
+            st.bar_chart(cal_df)
+        with chart_right:
+            st.markdown("**Macros by meal (grams)**")
+            macro_df = pd.DataFrame(
+                {
+                    "Protein": [meal_totals(a)["protein_g"] for a in analyses.values()],
+                    "Carbs": [meal_totals(a)["carbs_g"] for a in analyses.values()],
+                    "Fat": [meal_totals(a)["fat_g"] for a in analyses.values()],
+                },
+                index=list(analyses.keys()),
+            )
+            st.bar_chart(macro_df)
 
     # --- Per-meal breakdown --------------------------------------------------
     st.subheader("Meal breakdown")
@@ -598,37 +646,67 @@ if analyses:
         with st.expander(
             f"{MEAL_ICONS.get(meal, '🍽️')} {meal} - {t['calories']:.0f} kcal "
             f"- score {a['health_score']}/10",
-            expanded=False,
+            expanded=lite_mode,
         ):
             st.write(a["summary"])
             st.caption(f"Estimate confidence: {a['confidence']}")
-            items_df = pd.DataFrame(a["items"]).rename(
-                columns={
-                    "name": "Food", "portion": "Portion", "calories": "kcal",
-                    "protein_g": "Protein (g)", "carbs_g": "Carbs (g)", "fat_g": "Fat (g)",
-                    "fiber_g": "Fiber (g)", "sugar_g": "Sugar (g)", "sodium_mg": "Sodium (mg)",
-                }
-            )
-            st.dataframe(items_df, width="stretch", hide_index=True)
-            if a["micronutrients"]:
-                st.markdown("**Key vitamins & minerals**")
-                micro_df = pd.DataFrame(a["micronutrients"]).rename(
+            if lite_mode:
+                item_rows = [
+                    [i["name"], i["portion"], f"{i['calories']:.0f}", f"{i['protein_g']:.1f}",
+                     f"{i['carbs_g']:.1f}", f"{i['fat_g']:.1f}", f"{i['fiber_g']:.1f}",
+                     f"{i['sugar_g']:.1f}", f"{i['sodium_mg']:.0f}"]
+                    for i in a["items"]
+                ]
+                item_rows.append([
+                    "**Total**", "", f"**{t['calories']:.0f}**", f"**{t['protein_g']:.1f}**",
+                    f"**{t['carbs_g']:.1f}**", f"**{t['fat_g']:.1f}**", f"**{t['fiber_g']:.1f}**",
+                    f"**{t['sugar_g']:.1f}**", f"**{t['sodium_mg']:.0f}**",
+                ])
+                st.markdown(md_table(
+                    ["Food", "Portion", "kcal", "Protein", "Carbs", "Fat", "Fiber",
+                     "Sugar", "Sodium (mg)"], item_rows,
+                ))
+                if a["micronutrients"]:
+                    st.markdown("**Key vitamins & minerals**")
+                    st.markdown(md_table(
+                        ["Nutrient", "Amount", "% Daily Value"],
+                        [[m["name"], m["amount"], f"{m['daily_value_percent']:.0f}%"]
+                         for m in a["micronutrients"]],
+                    ))
+            else:
+                items_df = pd.DataFrame(a["items"]).rename(
                     columns={
-                        "name": "Nutrient", "amount": "Amount",
-                        "daily_value_percent": "% Daily Value",
+                        "name": "Food", "portion": "Portion", "calories": "kcal",
+                        "protein_g": "Protein (g)", "carbs_g": "Carbs (g)", "fat_g": "Fat (g)",
+                        "fiber_g": "Fiber (g)", "sugar_g": "Sugar (g)",
+                        "sodium_mg": "Sodium (mg)",
                     }
                 )
-                st.dataframe(micro_df, width="stretch", hide_index=True)
+                st.dataframe(items_df, width="stretch", hide_index=True)
+                if a["micronutrients"]:
+                    st.markdown("**Key vitamins & minerals**")
+                    micro_df = pd.DataFrame(a["micronutrients"]).rename(
+                        columns={
+                            "name": "Nutrient", "amount": "Amount",
+                            "daily_value_percent": "% Daily Value",
+                        }
+                    )
+                    st.dataframe(micro_df, width="stretch", hide_index=True)
             if a.get("notes"):
                 st.info(a["notes"])
 
     # --- AI recommendations --------------------------------------------------
     if report:
         st.subheader("🧠 Recommendations")
-        score_col, text_col = st.columns([1, 3])
-        score_col.metric("Overall score", f"{report['overall_score']}/100")
-        text_col.markdown(f"### {report['headline']}")
-        text_col.write(report["summary"])
+        if lite_mode:
+            st.markdown(f"### Overall score: {report['overall_score']}/100")
+            st.markdown(f"**{report['headline']}**")
+            st.write(report["summary"])
+        else:
+            score_col, text_col = st.columns([1, 3])
+            score_col.metric("Overall score", f"{report['overall_score']}/100")
+            text_col.markdown(f"### {report['headline']}")
+            text_col.write(report["summary"])
 
         good_col, gap_col = st.columns(2)
         with good_col:
