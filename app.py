@@ -29,6 +29,17 @@ st.set_page_config(
 )
 
 DEFAULT_MODEL = "gemini-flash-latest"  # alias that always points at the newest Flash
+# Presets shown in the sidebar dropdown. Model names change over time, so the last
+# option ("Custom...") lets you type any model ID that your API key can use.
+MODEL_OPTIONS = [
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-3.8-flash",
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+]
+CUSTOM_MODEL_LABEL = "Custom..."
 MEAL_TYPES = ["Breakfast", "Lunch", "Dinner", "Snacks"]
 MEAL_ICONS = {"Breakfast": "🍳", "Lunch": "🥗", "Dinner": "🍝", "Snacks": "🍎"}
 MAX_IMAGE_SIDE = 1280  # px - keeps uploads small and fast
@@ -380,10 +391,24 @@ with st.sidebar:
         type="password",
         help="Get a free key at https://aistudio.google.com/apikey",
     )
-    model_name = st.text_input(
-        "Model", value=get_default_model(),
-        help="e.g. gemini-flash-latest or any Gemini Flash model your key can access.",
+    _default_model = get_default_model()
+    _options = MODEL_OPTIONS + [CUSTOM_MODEL_LABEL]
+    _choice = st.selectbox(
+        "Gemini model",
+        _options,
+        index=_options.index(_default_model) if _default_model in MODEL_OPTIONS
+        else len(_options) - 1,
+        help="Pick a model, or choose 'Custom...' to type any model ID your key can use. "
+        "Flash models are fast and cheap; Pro is slower but more careful.",
     )
+    if _choice == CUSTOM_MODEL_LABEL:
+        model_name = st.text_input(
+            "Custom model ID",
+            value="" if _default_model in MODEL_OPTIONS else _default_model,
+            placeholder="e.g. gemini-3.8-flash",
+        )
+    else:
+        model_name = _choice
 
     st.subheader("👤 Your profile")
     sex = st.radio("Sex", ["Male", "Female"], horizontal=True)
@@ -465,9 +490,10 @@ if analyze_clicked:
         try:
             client = get_client(api_key.strip())
             new_analyses: dict[str, dict] = {}
-            progress = st.progress(0.0, text="Starting analysis...")
+            progress = st.empty()
+            progress.info("⏳ Starting analysis...")
             for idx, (meal, data) in enumerate(filled.items()):
-                progress.progress(idx / (len(filled) + 1), text=f"Analyzing {meal.lower()}...")
+                progress.info(f"⏳ Analyzing {meal.lower()}...")
                 images = [prepare_image(f.getvalue()) for f in data["files"]]
                 result = analyze_meal(
                     client, model_name.strip() or DEFAULT_MODEL, meal,
@@ -482,20 +508,23 @@ if analyze_clicked:
                 progress.empty()
                 st.error("No food could be identified. Try a clearer photo or description.")
             else:
-                progress.progress(0.85, text="Writing your personalised report...")
+                progress.info("⏳ Writing your personalised report...")
                 missing = [m for m in MEAL_TYPES if m not in new_analyses]
                 report = generate_report(
                     client, model_name.strip() or DEFAULT_MODEL,
                     profile, targets, new_analyses, missing,
                 )
-                progress.progress(1.0, text="Done!")
                 progress.empty()
                 st.session_state["analyses"] = new_analyses
                 st.session_state["report"] = report.model_dump()
                 st.session_state["snapshot"] = {"profile": profile, "targets": targets}
+                st.session_state["model_used"] = model_name.strip() or DEFAULT_MODEL
         except Exception as exc:  # noqa: BLE001
             st.error(f"Something went wrong: {exc}")
-            st.info("Check your API key, model name and internet connection, then try again.")
+            st.info(
+                "Check your API key and internet connection. If the error mentions "
+                "'not found' or '404', pick a different model in the sidebar."
+            )
 
 # --------------------------------------------------------------------------- #
 # Results
@@ -507,6 +536,8 @@ snapshot = st.session_state.get("snapshot")
 if analyses:
     st.divider()
     st.header("📊 Your nutrition report")
+    if st.session_state.get("model_used"):
+        st.caption(f"Analysed with: {st.session_state['model_used']}")
     used_profile = snapshot["profile"] if snapshot else profile
     used_targets = snapshot["targets"] if snapshot else targets
     totals = day_totals(analyses)
@@ -527,7 +558,7 @@ if analyses:
         target = used_targets[key]
         eaten = totals[key]
         col.metric(label, f"{eaten:.0f} {unit}", f"target {target} {unit}", delta_color="off")
-        col.progress(min(eaten / target, 1.0) if target else 0.0)
+        col.caption(f"{min(eaten / target * 100, 999):.0f}% of target" if target else "")
 
     extra_cols = st.columns(2)
     extra_cols[0].metric(
